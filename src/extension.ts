@@ -179,7 +179,7 @@ export function activate(context: vscode.ExtensionContext) {
 					let maybe_cached = IndexCache.get(name);
 	
 					if (position.line === version_line) {
-						get_crate_versions(name, list, maybe_cached, IndexCache);		
+						await get_crate_versions(name, list, maybe_cached, IndexCache);		
 					} else if (current_key === 'features') {
 						let json = await get_or_insert_cached_index(name, maybe_cached, IndexCache);
 	
