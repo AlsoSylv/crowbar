@@ -49,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
 		async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext) {
 			let idx = position.line;
 			let current_section = null;
-			let name = null;
+			let name;
 			let current_section_line = 0;
 			let list = new vscode.CompletionList();
 
@@ -57,9 +57,6 @@ export function activate(context: vscode.ExtensionContext) {
 				let text = document.lineAt(i).text;
 				if (text.startsWith('[')) {
 					let normalized = text.replace('[', '').replace(']', '').split('.');
-
-					console.log(normalized);
-
 					current_section = normalized[0];	
 					name = normalized[1];
 					current_section_line = i;
@@ -69,7 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 			let current = document.lineAt(idx);
 
-			if (current_section === "dependencies" && name === null) {
+			if (current_section === "dependencies" && name === undefined) {
 				let raw_text = current.text;
 				let index = raw_text.indexOf('=');
 				let space_index = raw_text.indexOf(' ');
@@ -104,14 +101,18 @@ export function activate(context: vscode.ExtensionContext) {
 						await get_crate_versions(name, list, maybe_cached, IndexCache);
 					}
 				}
-			} else if (current_section === "dependencies" && name !== null) {
+			} else if (current_section === "dependencies" && name !== undefined) {
 				let version_line = -1;
 				let crate_version = "";
+				let features_start_line = -1;
+				let feature_start_char = -1;
+				let features_end_line = -1;
+				let feature_end_char = -1;
+				let features_has_end = false;
 
 				for(let i = current_section_line + 1; i < document.lineCount; i++) {
 					const current_document_line: vscode.TextLine = document.lineAt(i);
 					const current_text: string = current_document_line.text;
-					console.log(current_text);
 					const first_char_index = current_document_line.firstNonWhitespaceCharacterIndex;
 					const first_char = current_text.charAt(first_char_index);
 
@@ -124,77 +125,59 @@ export function activate(context: vscode.ExtensionContext) {
 						}
 					}
 
+					if (first_char === 'f') {
+						const equals_index = current_text.indexOf('=');
+
+						if (current_text.substring(first_char_index, equals_index).trim() === "features") {
+							features_start_line = i;
+							feature_start_char = current_text.indexOf('[');
+							if (current_text.trimEnd().endsWith(']')) {
+								features_end_line = i;
+								features_has_end = true;
+								feature_end_char = current_text.indexOf(']');
+							}
+						}
+					}
+
+					if (features_start_line !== -1 && features_end_line === -1) {
+						if (current_text.trimEnd().endsWith(']')) {
+							features_end_line = i;
+							features_has_end = true;
+							feature_end_char = current_text.indexOf(']');
+						}
+					}
+
 					if (first_char === '[') {
 						break;
 					}
 				}
 
-				console.log(crate_version);
-				console.log(version_line);
-
 				if (position.line === current_section_line) {
-					list.isIncomplete = true;
-
 					let text = document.lineAt(current_section_line).text;
-					console.log(text);
-
 					let before_cursor = text.substring(0, position.character);
-					console.log(before_cursor);
+					let after_cursor = text.substring(position.character);
 
-					if (before_cursor.includes('.')) {
+					if (before_cursor.includes('.') && after_cursor.includes(']')) {
+						list.isIncomplete = true;
+
 						await crates_io_search(name, list, SearchCache, true, version_line === -1, new vscode.Position(position.line, text.length + 1));
 					}
 				} else {
 					list.isIncomplete = false;
-					console.log(name);
-	
-					let current_key;
-	
-					let current_line_text = document.lineAt(position.line).text;
-	
-					let index_of_equals = current_line_text.indexOf('=');	
-	
-					if (index_of_equals === -1) {
-						console.log(current_line_text);
-	
-						for(let i = position.line - 1; i >= 0; i--) {
-							let current_line_text = document.lineAt(i).text;
-							console.log(current_line_text);
-	
-							let index_of_equals = current_line_text.indexOf('=');
-	
-							if (index_of_equals < 0) {
-								continue;
-							} else {
-								current_key = current_line_text.substring(0, index_of_equals).trim();
-								break;
-							}
-						}
-					} else {
-						current_key = current_line_text.substring(0, index_of_equals).trim();
-					}
-	
-					console.log(current_key);
-	
 					let maybe_cached = IndexCache.get(name);
-	
+
+					const within_feature_start = position.line >= features_start_line && position.character > feature_start_char;
+					const within_feature_end = position.line <= features_end_line && position.character <= feature_end_char;
+
 					if (position.line === version_line) {
-						await get_crate_versions(name, list, maybe_cached, IndexCache);		
-					} else if (current_key === 'features') {
-						let json = await get_or_insert_cached_index(name, maybe_cached, IndexCache);
-	
-						console.log(crate_version);	
+						await get_crate_versions(name, list, maybe_cached, IndexCache);
+					} else if (within_feature_start && (within_feature_end || !features_has_end)) {
+						const json = await get_or_insert_cached_index(name, maybe_cached, IndexCache);
+						const full_version = crate_version.split('.').length < 3;
+
+						const version = json.versions.find((elem) => full_version ? elem.num === crate_version : elem.num.startsWith(crate_version))!;
 				
-						let version;
-				
-						if (crate_version.split('.').length < 3) {
-							version = json.versions.find((elem) => elem.num.startsWith(crate_version));
-						} else {
-							version = json.versions.find((element) => element.num === crate_version);
-						}
-				
-				
-						let features = Object.keys(version!.features);
+						const features = Object.keys(version.features);
 				
 						for(let feature of features) {
 							list.items.push({
@@ -257,13 +240,12 @@ async function get_crate_features(raw_text: string, object: string, containing_c
 		let version;
 
 		if (crate_version.split('.').length < 3) {
-			version = json.versions.find((elem) => elem.num.startsWith(crate_version));
+			version = json.versions.find((elem) => elem.num.startsWith(crate_version))!;
 		} else {
-			version = json.versions.find((element) => element.num === crate_version);
+			version = json.versions.find((element) => element.num === crate_version)!;
 		}
 
-
-		let features = Object.keys(version!.features);
+		let features = Object.keys(version.features);
 
 		for(let feature of features) {
 			list.items.push({
