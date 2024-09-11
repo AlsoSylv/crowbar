@@ -326,7 +326,9 @@ async function get_or_insert_cached_index(name: string, maybe_cached: crateIndex
 	let json;
 
 	if (maybe_cached === undefined) {
-		let index = await fetch(url);
+		let index = await fetch(url, { headers: {
+			"User-Agent": "AlsoSylv/Crowbar"
+		} });
 		let fetched_json = await index.json() as { versions: crateIndexObject[] };
 		
 		IndexCache.set(name, fetched_json);
@@ -358,7 +360,9 @@ async function crates_io_search(name: string, completionList: vscode.CompletionL
 	let json;
 
 	if (maybe_cached === undefined) {
-		let response = await fetch(url);
+		let response = await fetch(url, { headers: {
+			"User-Agent": "AlsoSylv/Crowbar"
+		} });
 		let fetched_json = await response.json() as crateSearch;
 		
 		SearchCache.set(name, fetched_json);
