@@ -26,6 +26,18 @@ type crateIndexObject = {
 	features: object,
 }
 
+type CargoFile = {
+	dependencies_start: number,
+	dependencies_end: number,
+	multiline_dependencies: Array<MultilineDep>
+}
+
+type MultilineDep = {
+	start_line: number,
+	end_line: number,
+	name: string,
+}
+
 const API_URL = new URL("https://crates.io");
 const INDEX_URL = new URL("https://index.crates.io");
 
@@ -50,68 +62,83 @@ export function activate(context: vscode.ExtensionContext) {
 			let idx = position.line;
 			let list = new vscode.CompletionList();
 
-			let dependencies_start: number = -1;
-			let dependencies_end: number = document.lineCount;
+			function parse_multiline_dep(document: vscode.TextDocument, name: string, i: number): MultilineDep {
+				let end_line = document.lineCount;
 
-			let multiline_dependencies: { start_line: number, end_line: number, name: string }[] = new Array();
-
-			for(let i = 0; i < document.lineCount; i++) {
-				const current_line = document.lineAt(i);
-
-				if (current_line.isEmptyOrWhitespace) {
-					continue;
+				for(let j = i + 1; j < document.lineCount; j++) {
+					const current_line = document.lineAt(j);
+					if (current_line.isEmptyOrWhitespace) {
+						continue;
+					}
+	
+					const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
+					const first_char = current_line.text.charAt(first_char_idex);
+					if (first_char === '[') {
+						end_line = j;
+						i = j;
+						break;
+					}
 				}
 
-				const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
-				const first_char = current_line.text.charAt(first_char_idex);
+				return { start_line: i, end_line, name, };
+			}
 
-				if (first_char === '[') {
-					if (dependencies_start !== -1 && dependencies_end === document.lineCount) {
-						dependencies_end = i;
+			function parse_cargo_toml(document: vscode.TextDocument): CargoFile {
+				let dependencies_start: number = -1;
+				let dependencies_end: number = document.lineCount;
+	
+				let multiline_dependencies: MultilineDep[] = new Array();
+	
+				for(let i = 0; i < document.lineCount; i++) {
+					const current_line = document.lineAt(i);
+	
+					if (current_line.isEmptyOrWhitespace) {
+						continue;
 					}
-
-					if (current_line.text.charAt(first_char_idex + 1) === 'd') {
-						let normalized = current_line.text.replace('[', '').replace(']', '').split('.');
-
-						if (normalized[1] === undefined && normalized[0] === "dependencies") {
-							dependencies_start = i;
-						} else if (normalized[1] !== undefined && normalized[0] === "dependencies") {
-							let end_line = document.lineCount;
-
-							for(let j = i + 1; j < document.lineCount; j++) {
-								const current_line = document.lineAt(j);
-								if (current_line.isEmptyOrWhitespace) {
-									continue;
-								}
-				
-								const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
-								const first_char = current_line.text.charAt(first_char_idex);
-								if (first_char === '[') {
-									end_line = j;
-									break;
-								}
+	
+					const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
+					const first_char = current_line.text.charAt(first_char_idex);
+	
+					if (first_char === '[') {
+						if (dependencies_start !== -1 && dependencies_end === document.lineCount) {
+							dependencies_end = i;
+						}
+	
+						if (current_line.text.charAt(first_char_idex + 1) === 'd') {
+							let normalized = current_line.text.replace('[', '').replace(']', '').split('.');
+	
+							let key = normalized[0];
+							let maybe_name = normalized[1];
+	
+							if (maybe_name === undefined && key === "dependencies") {
+								dependencies_start = i;
+							} else if (maybe_name !== undefined && key === "dependencies") {
+								multiline_dependencies.push(parse_multiline_dep(document, maybe_name, i));
 							}
-
-							multiline_dependencies.push({ start_line: i, end_line, name: normalized[1]});
 						}
 					}
 				}
+
+				return {
+					dependencies_start,
+					dependencies_end,
+					multiline_dependencies,
+				};
 			}
+			
+			let cargo_file = parse_cargo_toml(document);
 
-			console.log(dependencies_start);
-			console.log(dependencies_end);
-
-			if (position.line > dependencies_start && position.line < dependencies_end) {
+			if (position.line > cargo_file.dependencies_start && position.line < cargo_file.dependencies_end) {
 				let current = document.lineAt(idx);
 				let raw_text = current.text;
 				let index = raw_text.indexOf('=');
-				let space_index = raw_text.indexOf(' ');
 				list.isIncomplete = index === -1;
 
 				if (index === -1) {
 					await crates_io_search(raw_text.trim(), list, SearchCache, false, true, position);
 				} else {
-					let name = raw_text.substring(0, space_index === -1 ? index : space_index);
+					let space_index = raw_text.indexOf(' ');
+					let name = raw_text.substring(0, space_index > -1 ? index : space_index);
 					let object = raw_text.substring(index + 1).trim();
 
 					let maybe_cached = IndexCache.get(name);
@@ -140,9 +167,7 @@ export function activate(context: vscode.ExtensionContext) {
 					}
 				}
 			} else {
-				console.log(multiline_dependencies);
-
-				for(let {start_line, end_line, name} of multiline_dependencies) {
+				for(let {start_line, end_line, name} of cargo_file.multiline_dependencies) {
 					let version_line = -1;
 					let crate_version = "";
 					let features_start_line = -1;

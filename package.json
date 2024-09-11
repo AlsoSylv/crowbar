@@ -1,7 +1,8 @@
 {
   "name": "crowbar",
   "displayName": "crowbar",
-  "description": "",
+  "description": "Extension to search crates.io from VSCode",
+  "repository": "https://github.com/AlsoSylv/crowbar",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.93.0"
