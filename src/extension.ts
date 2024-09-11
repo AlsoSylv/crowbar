@@ -48,29 +48,64 @@ export function activate(context: vscode.ExtensionContext) {
 	vscode.languages.registerCompletionItemProvider({ language: "toml", pattern: "**/Cargo.toml" }, {
 		async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext) {
 			let idx = position.line;
-			let current_section = null;
-			let name;
-			let current_section_line = 0;
 			let list = new vscode.CompletionList();
 
-			for(let i = idx; i >= 0; i--) {
-				let text = document.lineAt(i).text;
-				if (text.startsWith('[')) {
-					let normalized = text.replace('[', '').replace(']', '').split('.');
-					current_section = normalized[0];	
-					name = normalized[1];
-					current_section_line = i;
-					break;
+			let dependencies_start: number = -1;
+			let dependencies_end: number = document.lineCount;
+
+			let multiline_dependencies: { start_line: number, end_line: number, name: string }[] = new Array();
+
+			for(let i = 0; i < document.lineCount; i++) {
+				const current_line = document.lineAt(i);
+
+				if (current_line.isEmptyOrWhitespace) {
+					continue;
+				}
+
+				const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
+				const first_char = current_line.text.charAt(first_char_idex);
+
+				if (first_char === '[') {
+					if (dependencies_start !== -1 && dependencies_end === document.lineCount) {
+						dependencies_end = i;
+					}
+
+					if (current_line.text.charAt(first_char_idex + 1) === 'd') {
+						let normalized = current_line.text.replace('[', '').replace(']', '').split('.');
+
+						if (normalized[1] === undefined && normalized[0] === "dependencies") {
+							dependencies_start = i;
+						} else if (normalized[1] !== undefined && normalized[0] === "dependencies") {
+							let end_line = document.lineCount;
+
+							for(let j = i + 1; j < document.lineCount; j++) {
+								const current_line = document.lineAt(j);
+								if (current_line.isEmptyOrWhitespace) {
+									continue;
+								}
+				
+								const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
+								const first_char = current_line.text.charAt(first_char_idex);
+								if (first_char === '[') {
+									end_line = j;
+									break;
+								}
+							}
+
+							multiline_dependencies.push({ start_line: i, end_line, name: normalized[1]});
+						}
+					}
 				}
 			}
 
-			let current = document.lineAt(idx);
+			console.log(dependencies_start);
+			console.log(dependencies_end);
 
-			if (current_section === "dependencies" && name === undefined) {
+			if (position.line > dependencies_start && position.line < dependencies_end) {
+				let current = document.lineAt(idx);
 				let raw_text = current.text;
 				let index = raw_text.indexOf('=');
 				let space_index = raw_text.indexOf(' ');
-
 				list.isIncomplete = index === -1;
 
 				if (index === -1) {
@@ -81,109 +116,112 @@ export function activate(context: vscode.ExtensionContext) {
 
 					let maybe_cached = IndexCache.get(name);
 
-					if (object.startsWith('{') && object.endsWith('}')) {
-						let current_pos = position.character;
-						let leading_equals = raw_text.substring(0, current_pos).lastIndexOf('=');
-						let containing_cursor = raw_text.substring(leading_equals, current_pos);
-
-						let current_key = get_current_key(raw_text, leading_equals);
-
-						if (current_key === 'version') {
-							if (containing_cursor.includes('"') && (!containing_cursor.endsWith('"') || raw_text.charAt(current_pos) === '"')) {	
-								await get_crate_versions(name, list, maybe_cached, IndexCache);
-							}
-						} else if (current_key === 'features') {
-							let json = await get_or_insert_cached_index(name, maybe_cached, IndexCache);
-							await get_crate_features(raw_text, object, containing_cursor, json, current_pos, list);
-						}
-						
-					} else if (object.length === 0 || (object.startsWith('"') && object.endsWith('"'))) {
+					if (object.length === 0 || (object.startsWith('"') && object.endsWith('"'))) {
 						await get_crate_versions(name, list, maybe_cached, IndexCache);
+					} else if (object.startsWith('{')) {
+						if (object.endsWith('}')) {
+							let current_pos = position.character;
+							let leading_equals = raw_text.substring(0, current_pos).lastIndexOf('=');
+							let containing_cursor = raw_text.substring(leading_equals, current_pos);
+	
+							let current_key = get_current_key(raw_text, leading_equals);
+	
+							if (current_key === 'version') {
+								if (containing_cursor.includes('"') && (!containing_cursor.endsWith('"') || raw_text.charAt(current_pos) === '"')) {	
+									await get_crate_versions(name, list, maybe_cached, IndexCache);
+								}
+							} else if (current_key === 'features') {
+								let json = await get_or_insert_cached_index(name, maybe_cached, IndexCache);
+								await get_crate_features(raw_text, object, containing_cursor, json, current_pos, list);
+							}
+						} else {
+							// TODO: Support multiline object statements, even if they're bad and I don't like them :(
+						}
 					}
 				}
-			} else if (current_section === "dependencies" && name !== undefined) {
-				let version_line = -1;
-				let crate_version = "";
-				let features_start_line = -1;
-				let feature_start_char = -1;
-				let features_end_line = -1;
-				let feature_end_char = -1;
-				let features_has_end = false;
+			} else {
+				console.log(multiline_dependencies);
 
-				for(let i = current_section_line + 1; i < document.lineCount; i++) {
-					const current_document_line: vscode.TextLine = document.lineAt(i);
-					const current_text: string = current_document_line.text;
-					const first_char_index = current_document_line.firstNonWhitespaceCharacterIndex;
-					const first_char = current_text.charAt(first_char_index);
+				for(let {start_line, end_line, name} of multiline_dependencies) {
+					let version_line = -1;
+					let crate_version = "";
+					let features_start_line = -1;
+					let feature_start_char = -1;
+					let features_end_line = -1;
+					let feature_end_char = -1;
+					let features_has_end = false;
 
-					if (first_char === 'v') {
-						const equals_index = current_text.indexOf('=');
+					// TODO: Promote this loop to part of initial document parsing
+					for(let i = start_line + 1; i < end_line; i++) {
+						const current_document_line: vscode.TextLine = document.lineAt(i);
+						const current_text: string = current_document_line.text;
+						const first_char_index = current_document_line.firstNonWhitespaceCharacterIndex;
+						const first_char = current_text.charAt(first_char_index);
 
-						if (current_text.substring(first_char_index, equals_index).trim() === "version") {
-							version_line = i;
-							crate_version = current_text.substring(current_text.indexOf('"', equals_index) + 1, current_text.lastIndexOf('"')).trim();
+						if (first_char === 'v') {
+							const equals_index = current_text.indexOf('=');
+
+							if (current_text.substring(first_char_index, equals_index).trim() === "version") {
+								version_line = i;
+								crate_version = current_text.substring(current_text.indexOf('"', equals_index) + 1, current_text.lastIndexOf('"')).trim();
+							}
 						}
-					}
 
-					if (first_char === 'f') {
-						const equals_index = current_text.indexOf('=');
+						if (first_char === 'f') {
+							const equals_index = current_text.indexOf('=');
 
-						if (current_text.substring(first_char_index, equals_index).trim() === "features") {
-							features_start_line = i;
-							feature_start_char = current_text.indexOf('[');
+							if (current_text.substring(first_char_index, equals_index).trim() === "features") {
+								features_start_line = i;
+								feature_start_char = current_text.indexOf('[');
+							}
+						}
+
+						if (features_start_line !== -1 && features_end_line === -1) {
 							if (current_text.trimEnd().endsWith(']')) {
 								features_end_line = i;
 								features_has_end = true;
 								feature_end_char = current_text.indexOf(']');
 							}
 						}
-					}
 
-					if (features_start_line !== -1 && features_end_line === -1) {
-						if (current_text.trimEnd().endsWith(']')) {
-							features_end_line = i;
-							features_has_end = true;
-							feature_end_char = current_text.indexOf(']');
+						if (first_char === '[') {
+							break;
 						}
 					}
 
-					if (first_char === '[') {
-						break;
-					}
-				}
+					if (position.line === start_line) {
+						let text = document.lineAt(start_line).text;
+						let before_cursor = text.substring(0, position.character);
+						let after_cursor = text.substring(position.character);
 
-				if (position.line === current_section_line) {
-					let text = document.lineAt(current_section_line).text;
-					let before_cursor = text.substring(0, position.character);
-					let after_cursor = text.substring(position.character);
+						if (before_cursor.includes('.') && after_cursor.includes(']')) {
+							list.isIncomplete = true;
 
-					if (before_cursor.includes('.') && after_cursor.includes(']')) {
-						list.isIncomplete = true;
+							await crates_io_search(name, list, SearchCache, true, version_line === -1, new vscode.Position(position.line, text.length + 1));
+						}
+					} else {
+						list.isIncomplete = false;
+						let maybe_cached = IndexCache.get(name);
 
-						await crates_io_search(name, list, SearchCache, true, version_line === -1, new vscode.Position(position.line, text.length + 1));
-					}
-				} else {
-					list.isIncomplete = false;
-					let maybe_cached = IndexCache.get(name);
+						const within_feature_start = position.line >= features_start_line && position.character > feature_start_char;
+						const within_feature_end = position.line <= features_end_line && position.character <= feature_end_char;
 
-					const within_feature_start = position.line >= features_start_line && position.character > feature_start_char;
-					const within_feature_end = position.line <= features_end_line && position.character <= feature_end_char;
+						if (position.line === version_line) {
+							await get_crate_versions(name, list, maybe_cached, IndexCache);
+						} else if (within_feature_start && (within_feature_end || !features_has_end)) {
+							const json = await get_or_insert_cached_index(name, maybe_cached, IndexCache);
+							const full_version = crate_version.split('.').length < 3;
 
-					if (position.line === version_line) {
-						await get_crate_versions(name, list, maybe_cached, IndexCache);
-					} else if (within_feature_start && (within_feature_end || !features_has_end)) {
-						const json = await get_or_insert_cached_index(name, maybe_cached, IndexCache);
-						const full_version = crate_version.split('.').length < 3;
-
-						const version = json.versions.find((elem) => full_version ? elem.num === crate_version : elem.num.startsWith(crate_version))!;
-				
-						const features = Object.keys(version.features);
-				
-						for(let feature of features) {
-							list.items.push({
-								label: feature,
-								insertText: '"' + feature + '"',
-							});
+							const version = json.versions.find((elem) => full_version ? elem.num === crate_version : elem.num.startsWith(crate_version))!;
+						
+							const features = Object.keys(version.features);
+						
+							for(let feature of features) {
+								list.items.push({
+									label: feature,
+									insertText: '"' + feature + '"',
+								});
+							}
 						}
 					}
 				}
