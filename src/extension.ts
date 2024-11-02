@@ -4,6 +4,11 @@ import * as vscode from 'vscode';
 import { LRUCache } from 'lru-cache';
 import TTLCache from '@isaacs/ttlcache';
 
+type CargoWorkspace = {
+	members: Map<string, CargoFile>,
+	head: CargoFile | null,
+}
+
 type crateSearch =  {
 	crates: crateSearchObject[],
 	meta: any,
@@ -46,6 +51,11 @@ type MultilineDep = {
 const API_URL = new URL("https://crates.io");
 const INDEX_URL = new URL("https://index.crates.io");
 
+const WORKSPACE: CargoWorkspace = {
+	members: new Map(),
+	head: null,
+};
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
@@ -62,102 +72,32 @@ export function activate(context: vscode.ExtensionContext) {
 		max: 100,
 	});
 
+	let files = vscode.workspace.findFiles('**/Cargo.toml', "**/target/**");
+
+	files.then((uris) => {
+		for(let uri of uris) {
+			console.log(uri);
+			vscode.workspace.openTextDocument(uri).then((file) => { 
+				let {file: cargo_file, head} = parse_cargo_toml(file);
+				WORKSPACE.members.set(uri.path, cargo_file);
+				if (head) { WORKSPACE.head = cargo_file; };
+			});
+		}
+	});
+
 	vscode.languages.registerCompletionItemProvider({ language: "toml", pattern: "**/Cargo.toml" }, {
 		async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext) {
 			let idx = position.line;
 			let list = new vscode.CompletionList();
-			function parse_multiline_dep(document: vscode.TextDocument, name: string, i: number): [MultilineDep, number] {
-				let version_line = -1;
-				let feature_start_line = -1;
-				let feature_end_line = -1;
-				let feature_start_char = -1;
-				let feature_end_char = -1;
-
-				let end_line = document.lineCount;
-
-				let j = i + 1;
-
-				for(;j < document.lineCount; j++) {
-					const current_line = document.lineAt(j);
-					if (current_line.isEmptyOrWhitespace) {
-						continue;
-					}
-	
-					const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
-					const first_char = current_line.text.charAt(first_char_idex);
-					if (first_char === '[') {
-						end_line = j;
-						break;
-					}
-
-					if (current_line.text.startsWith('version', first_char_idex)) {
-						version_line = j;
-					}
-
-					if (current_line.text.startsWith('features', first_char_idex)) {
-						feature_start_line = j;
-						feature_start_char = current_line.text.indexOf('[');
-					}
-
-					if (feature_start_line !== -1 && feature_end_line === -1) {
-						const maybe_feature_end = current_line.text.trimEnd();
-
-						if (maybe_feature_end.endsWith(']')) {
-							feature_end_line = j;
-							feature_end_char = maybe_feature_end.length;
-						}
-					}
-				}
-
-				return [{ start_line: i, end_line, name, version_line, feature_start_line, feature_end_line, feature_start_char, feature_end_char }, j];
-			}
-
-			function parse_cargo_toml(document: vscode.TextDocument): CargoFile {
-				let dependencies_start: number = -1;
-				let dependencies_end: number = document.lineCount;
-	
-				let multiline_dependencies: MultilineDep[] = new Array();
-	
-				for(let i = 0; i < document.lineCount; i++) {
-					const current_line = document.lineAt(i);
-	
-					if (current_line.isEmptyOrWhitespace) {
-						continue;
-					}
-	
-					const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
-					const first_char = current_line.text.charAt(first_char_idex);
-	
-					if (first_char === '[') {
-						if (dependencies_start !== -1 && dependencies_end === document.lineCount) {
-							dependencies_end = i;
-						}
-	
-						if (current_line.text.charAt(first_char_idex + 1) === 'd') {
-							let normalized = current_line.text.replace('[', '').replace(']', '').split('.');
-	
-							let key = normalized[0];
-							let maybe_name = normalized[1];
-	
-							if (maybe_name === undefined && key === "dependencies") {
-								dependencies_start = i;
-							} else if (maybe_name !== undefined && key === "dependencies") {
-								const [multiline_dep, new_idx] = parse_multiline_dep(document, maybe_name, i);
-								multiline_dependencies.push(multiline_dep);
-								i = new_idx;
-							}
-						}
-					}
-				}
-
-				return {
-					dependencies_start,
-					dependencies_end,
-					multiline_dependencies,
-				};
-			}
 			
-			let cargo_file = parse_cargo_toml(document);
+			let cargo_file = WORKSPACE.members.get(document.uri.path);
+
+			if (cargo_file === undefined) {
+				console.log(document.uri);
+				return list;
+			}
+
+			console.log(position);
 
 			if (position.line > cargo_file.dependencies_start && position.line < cargo_file.dependencies_end) {
 				let current = document.lineAt(idx);
@@ -394,3 +334,107 @@ async function crates_io_search(name: string, completionList: vscode.CompletionL
 
 // This method is called when your extension is deactivated
 // export function deactivate() {}
+
+function parse_multiline_dep(document: vscode.TextDocument, name: string, i: number): [MultilineDep, number] {
+	let version_line = -1;
+	let feature_start_line = -1;
+	let feature_end_line = -1;
+	let feature_start_char = -1;
+	let feature_end_char = -1;
+
+	let end_line = document.lineCount;
+
+	let j = i + 1;
+
+	for(;j < document.lineCount; j++) {
+		const current_line = document.lineAt(j);
+		if (current_line.isEmptyOrWhitespace) {
+			continue;
+		}
+
+		const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
+		const first_char = current_line.text.charAt(first_char_idex);
+		if (first_char === '[') {
+			end_line = j;
+			break;
+		}
+
+		if (current_line.text.startsWith('version', first_char_idex)) {
+			version_line = j;
+		}
+
+		if (current_line.text.startsWith('features', first_char_idex)) {
+			feature_start_line = j;
+			feature_start_char = current_line.text.indexOf('[');
+		}
+
+		if (feature_start_line !== -1 && feature_end_line === -1) {
+			const maybe_feature_end = current_line.text.trimEnd();
+
+			if (maybe_feature_end.endsWith(']')) {
+				feature_end_line = j;
+				feature_end_char = maybe_feature_end.length;
+			}
+		}
+	}
+
+	return [{ start_line: i, end_line, name, version_line, feature_start_line, feature_end_line, feature_start_char, feature_end_char }, j];
+}
+
+function parse_cargo_toml(document: vscode.TextDocument): { file: CargoFile, head: boolean } {
+	let dependencies_start: number = -1;
+	let dependencies_end: number = document.lineCount;
+	let multiline_dependencies: MultilineDep[] = new Array();
+	let head = false;
+
+	for(let i = 0; i < document.lineCount; i++) {
+		const current_line = document.lineAt(i);
+
+		if (current_line.isEmptyOrWhitespace) {
+			continue;
+		}
+
+		const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
+		const first_char = current_line.text.charAt(first_char_idex);
+
+		if (first_char === '[') {
+			if (dependencies_start !== -1 && dependencies_end === document.lineCount) {
+				dependencies_end = i;
+			}
+
+			if (current_line.text.charAt(first_char_idex + 1) === 'd') {
+				let normalized = current_line.text.replace('[', '').replace(']', '').split('.');
+
+				let key = normalized[0];
+				let maybe_name = normalized[1];
+
+				switch(key) {
+					case "workspace": {
+						head = true;
+						break;
+					}
+					case "dependencies": {
+						if(maybe_name) {
+							dependencies_start = i;
+						} else {
+							const [multiline_dep, new_idx] = parse_multiline_dep(document, maybe_name, i);
+							multiline_dependencies.push(multiline_dep);
+							i = new_idx;
+						}
+
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	return {
+		file: {
+			dependencies_start,
+			dependencies_end,
+			multiline_dependencies,
+		},
+		head,
+	};
+}
