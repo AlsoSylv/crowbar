@@ -35,6 +35,7 @@ type CargoFile = {
 	dependencies_start: number,
 	dependencies_end: number,
 	multiline_dependencies: Array<MultilineDep>
+	text: string,
 }
 
 type MultilineDep = {
@@ -78,9 +79,9 @@ export function activate(context: vscode.ExtensionContext) {
 		for(let uri of uris) {
 			console.log(uri);
 			vscode.workspace.openTextDocument(uri).then((file) => { 
-				let {file: cargo_file, head} = parse_cargo_toml(file);
-				WORKSPACE.members.set(uri.path, cargo_file);
-				if (head) { WORKSPACE.head = cargo_file; };
+				let {file: parsed, head} = parse_cargo_toml(file);
+				WORKSPACE.members.set(uri.path, parsed);
+				if (head) { WORKSPACE.head = parsed; };
 			});
 		}
 	});
@@ -97,7 +98,13 @@ export function activate(context: vscode.ExtensionContext) {
 				return list;
 			}
 
-			console.log(position);
+			// Update the parsed file if the text has changed
+			if (cargo_file.text !== document.getText()) {
+				let {file: parsed, head} = parse_cargo_toml(document);
+				WORKSPACE.members.set(document.uri.path, parsed);
+				if (head) { WORKSPACE.head = parsed; };
+				cargo_file = parsed;
+			}
 
 			if (position.line > cargo_file.dependencies_start && position.line < cargo_file.dependencies_end) {
 				let current = document.lineAt(idx);
@@ -387,46 +394,53 @@ function parse_cargo_toml(document: vscode.TextDocument): { file: CargoFile, hea
 	let multiline_dependencies: MultilineDep[] = new Array();
 	let head = false;
 
-	for(let i = 0; i < document.lineCount; i++) {
+	const text = document.getText();
+
+	console.log(document.lineCount);
+
+	// Use a while loop here instead of a for loop to avoid a lint
+	let i = 0;
+	while (i < document.lineCount) {
+		console.log(i);
 		const current_line = document.lineAt(i);
 
 		if (current_line.isEmptyOrWhitespace) {
+			i++;
 			continue;
 		}
 
-		const first_char_idex = current_line.firstNonWhitespaceCharacterIndex;
-		const first_char = current_line.text.charAt(first_char_idex);
+		const text = current_line.text;
+		const has_start_bracket = text.charAt(current_line.firstNonWhitespaceCharacterIndex) === '[';
+		const has_end_bracket = text.includes(']');
+		const first_char_idx =  has_start_bracket ? current_line.firstNonWhitespaceCharacterIndex + 1 : current_line.firstNonWhitespaceCharacterIndex;
+		const last_char_idx = has_end_bracket ? current_line.text.indexOf(']') : text.length;
+		const inner = text.slice(first_char_idx, last_char_idx);
+		// In case we're looking at something like `dependecies.name` or similar. 
+		// There is probably a better way to handle this 
+		const normalized = inner.split('.');
+		const key = normalized[0];
+		const maybe_name = normalized[1];
 
-		if (first_char === '[') {
-			if (dependencies_start !== -1 && dependencies_end === document.lineCount) {
-				dependencies_end = i;
+		switch(key) {
+			case "workspace": {
+				head = true;
+				break;
 			}
-
-			if (current_line.text.charAt(first_char_idex + 1) === 'd') {
-				let normalized = current_line.text.replace('[', '').replace(']', '').split('.');
-
-				let key = normalized[0];
-				let maybe_name = normalized[1];
-
-				switch(key) {
-					case "workspace": {
-						head = true;
-						break;
-					}
-					case "dependencies": {
-						if(maybe_name) {
-							dependencies_start = i;
-						} else {
-							const [multiline_dep, new_idx] = parse_multiline_dep(document, maybe_name, i);
-							multiline_dependencies.push(multiline_dep);
-							i = new_idx;
-						}
-
-						break;
-					}
+			case "dependencies": {
+				if(maybe_name) {
+					dependencies_start = i;
+				} else {
+					const [multiline_dep, new_idx] = parse_multiline_dep(document, maybe_name, i);
+					multiline_dependencies.push(multiline_dep);
+					i = new_idx;
+					continue;
 				}
+
+				break;
 			}
 		}
+
+		i++;
 	}
 
 	return {
@@ -434,6 +448,7 @@ function parse_cargo_toml(document: vscode.TextDocument): { file: CargoFile, hea
 			dependencies_start,
 			dependencies_end,
 			multiline_dependencies,
+			text,
 		},
 		head,
 	};
