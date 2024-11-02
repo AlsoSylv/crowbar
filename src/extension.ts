@@ -52,39 +52,36 @@ type MultilineDep = {
 const API_URL = new URL("https://crates.io");
 const INDEX_URL = new URL("https://index.crates.io");
 
-const WORKSPACE: CargoWorkspace = {
-	members: new Map(),
-	head: null,
-};
-
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
 	// Use the console to output diagnostic information (console.log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
 	console.log('Congratulations, your extension "crowbar" is now active!');
 
+	const WORKSPACE: CargoWorkspace = {
+		members: new Map(),
+		head: null,
+	};
+	
 	const IndexCache = new LRUCache<string, crateIndex>({
 		max: 100,
 	});
-
+	
 	const SearchCache = new TTLCache<string, crateSearch>({
 		ttl: 3 * 1000 * 60,
 		max: 100,
-	});
+	});	
 
-	let files = vscode.workspace.findFiles('**/Cargo.toml', "**/target/**");
+	let uris = await vscode.workspace.findFiles('**/Cargo.toml', "**/target/**");
 
-	files.then((uris) => {
-		for(let uri of uris) {
-			console.log(uri);
-			vscode.workspace.openTextDocument(uri).then((file) => { 
-				let {file: parsed, head} = parse_cargo_toml(file);
-				WORKSPACE.members.set(uri.path, parsed);
-				if (head) { WORKSPACE.head = parsed; };
-			});
-		}
-	});
+	for(const uri of uris) {
+		console.log(uri);
+		let document = await vscode.workspace.openTextDocument(uri);
+		let {file: parsed, head} = parse_cargo_toml(document);
+		WORKSPACE.members.set(uri.path, parsed);
+		if (head) { WORKSPACE.head = parsed; };
+	}
 
 	vscode.languages.registerCompletionItemProvider({ language: "toml", pattern: "**/Cargo.toml" }, {
 		async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken, context: vscode.CompletionContext) {
@@ -200,17 +197,6 @@ export function activate(context: vscode.ExtensionContext) {
 			return item;
 		},
 	});
-
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('crowbar.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from crowbar!');
-	});
-
-	context.subscriptions.push(disposable);
 }
 
 function get_current_key(raw_text: string, leading_equals: number): string {
