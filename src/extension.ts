@@ -35,7 +35,7 @@ type CargoFile = {
 	dependencies_start: number,
 	dependencies_end: number,
 	multiline_dependencies: Array<MultilineDep>
-	text: string,
+	version: number,
 }
 
 type MultilineDep = {
@@ -76,9 +76,9 @@ export async function activate(context: vscode.ExtensionContext) {
 	let uris = await vscode.workspace.findFiles('**/Cargo.toml', "**/target/**");
 
 	for(const uri of uris) {
-		console.log(uri);
 		let document = await vscode.workspace.openTextDocument(uri);
 		let {file: parsed, head} = parse_cargo_toml(document);
+		console.log(parsed);
 		WORKSPACE.members.set(uri.path, parsed);
 		if (head) { WORKSPACE.head = parsed; };
 	}
@@ -96,7 +96,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 
 			// Update the parsed file if the text has changed
-			if (cargo_file.text !== document.getText()) {
+			if (cargo_file.version !== document.version) {
 				let {file: parsed, head} = parse_cargo_toml(document);
 				WORKSPACE.members.set(document.uri.path, parsed);
 				if (head) { WORKSPACE.head = parsed; };
@@ -168,6 +168,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
 							const within_feature_start = position.line === feature_start_line ? position.character > feature_start_char : position.line > feature_start_line;
 							const within_feature_end = position.line === feature_end_line ? position.character <= feature_end_char : position.line < feature_end_line;
+
+							console.log(`${within_feature_start} ${within_feature_end}`);
 	
 							if (position.line === version_line) {
 								await get_crate_versions(name, list, maybe_cached, IndexCache);
@@ -376,36 +378,36 @@ function parse_multiline_dep(document: vscode.TextDocument, name: string, i: num
 
 function parse_cargo_toml(document: vscode.TextDocument): { file: CargoFile, head: boolean } {
 	let dependencies_start: number = -1;
-	let dependencies_end: number = document.lineCount;
+	let dependencies_end: number = -1;
 	let multiline_dependencies: MultilineDep[] = new Array();
 	let head = false;
 
-	const text = document.getText();
-
-	console.log(document.lineCount);
+	const version = document.version;
 
 	// Use a while loop here instead of a for loop to avoid a lint
 	let i = 0;
 	while (i < document.lineCount) {
-		console.log(i);
 		const current_line = document.lineAt(i);
-
 		if (current_line.isEmptyOrWhitespace) {
 			i++;
 			continue;
 		}
 
+		// Check the current text
 		const text = current_line.text;
-		const has_start_bracket = text.charAt(current_line.firstNonWhitespaceCharacterIndex) === '[';
+		const first_non_whitespace = current_line.firstNonWhitespaceCharacterIndex;
+		const has_start_bracket = text.charAt(first_non_whitespace) === '[';
+		if (dependencies_start !== -1 && has_start_bracket) { dependencies_end = i; }
+
 		const has_end_bracket = text.includes(']');
-		const first_char_idx =  has_start_bracket ? current_line.firstNonWhitespaceCharacterIndex + 1 : current_line.firstNonWhitespaceCharacterIndex;
+		const first_char_idx =  has_start_bracket ? first_non_whitespace + 1 : first_non_whitespace;
 		const last_char_idx = has_end_bracket ? current_line.text.indexOf(']') : text.length;
 		const inner = text.slice(first_char_idx, last_char_idx);
 		// In case we're looking at something like `dependecies.name` or similar. 
 		// There is probably a better way to handle this 
 		const normalized = inner.split('.');
 		const key = normalized[0];
-		const maybe_name = normalized[1];
+		const maybe_name = normalized.at(1);
 
 		switch(key) {
 			case "workspace": {
@@ -413,13 +415,19 @@ function parse_cargo_toml(document: vscode.TextDocument): { file: CargoFile, hea
 				break;
 			}
 			case "dependencies": {
+				// This indicates that we are in the `[dependencies.{name}]` syntax
 				if(maybe_name) {
-					dependencies_start = i;
-				} else {
+					// If that's the case, we take the parsed dep, and return the end line
 					const [multiline_dep, new_idx] = parse_multiline_dep(document, maybe_name, i);
+					// We add this to the overall workspace info
 					multiline_dependencies.push(multiline_dep);
+					// And move the cursor forward
 					i = new_idx;
+					// ..And if we moved the cursor forward, we should restart the loop
 					continue;
+				} else {
+					// Otherwise, we are just finding the start
+					dependencies_start = i;
 				}
 
 				break;
@@ -429,12 +437,15 @@ function parse_cargo_toml(document: vscode.TextDocument): { file: CargoFile, hea
 		i++;
 	}
 
+	// This indicates that the end of the deps is also just the end of the file
+	if (dependencies_end === -1) {dependencies_end = document.lineCount;}
+
 	return {
 		file: {
 			dependencies_start,
 			dependencies_end,
 			multiline_dependencies,
-			text,
+			version,
 		},
 		head,
 	};
